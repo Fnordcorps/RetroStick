@@ -909,6 +909,8 @@ def main():
                        help="Path to config file")
     args = parser.parse_args()
     
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+
     # Setup logging
     import logging
     logging.basicConfig(
@@ -919,8 +921,6 @@ def main():
             logging.FileHandler(CONFIG_DIR / "retrostick.log", mode='a')
         ]
     )
-    
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
     
     if args.startup:
         # Headless startup mode
