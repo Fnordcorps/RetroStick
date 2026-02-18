@@ -1,10 +1,6 @@
-# 🕹️ RetroStick Fix
+# 🕹️ RetroStick by Fnordcorps
 
 **Persistent arcade controller assignment for retro gaming cabinets on Windows**
-
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Platform: Windows](https://img.shields.io/badge/Platform-Windows%2010%2F11-blue.svg)]()
-[![Python 3.8+](https://img.shields.io/badge/Python-3.8%2B-green.svg)]()
 
 ---
 
@@ -112,9 +108,9 @@ cd retrostick-fix
 python retrostick_gui.py
 ```
 
-### Compiled Release (Coming Soon)
+### Compiled Release
 
-Pre-built `.exe` files will be available on the [Releases](../../releases) page so you don't need Python installed.
+Pre-built `.exe` files available on the [Releases](../../releases) page so you don't need Python installed.
 
 ## Usage
 
@@ -276,7 +272,7 @@ Contributions are welcome! Areas where help is especially appreciated:
 
 ```bash
 # Clone
-git clone https://github.com/YOUR_USERNAME/retrostick-fix.git
+git clone https://github.com/fnordcorps/retrostick-fix.git
 cd retrostick-fix
 
 # Run tests (if any)
@@ -295,9 +291,16 @@ MIT License — See [LICENSE](LICENSE) for details.
 
 - The **RetroBat** team for their incredible frontend
 - The **EmulationStation** project
-- The arcade cabinet building community for identifying and discussing this problem
+- The arcade cabinet building community for building awesome cabs
 - **devreorder** for inspiration on the approach (though we solve it differently)
 
 ---
 
 *Made with ❤️ for the arcade cabinet community. No more swapped controllers!*
+
+
+
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Platform: Windows](https://img.shields.io/badge/Platform-Windows%2010%2F11-blue.svg)]()
+[![Python 3.8+](https://img.shields.io/badge/Python-3.8%2B-green.svg)]()
