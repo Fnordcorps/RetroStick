@@ -1,7 +1,21 @@
 {
   "permissions": {
     "allow": [
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(python -m PyInstaller:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(\"/c/Program Files/GitHub CLI/gh.exe\" release delete v1.0.1 --yes)",
+      "Bash(\"/c/Program Files/GitHub:*)",
+      "Bash(python -c \"import py_compile; py_compile.compile\\(''retrostick_gui.py'', doraise=True\\); print\\(''retrostick_gui.py OK''\\)\")",
+      "Bash(python -c:*)",
+      "Bash(pip show:*)",
+      "Bash(pyinstaller:*)",
+      "Bash(gh release:*)",
+      "Bash(powershell -NoProfile -ExecutionPolicy Bypass -Command \"Get-PnpDevice -Class ''XnaComposite'',''XboxComposite'',''HIDClass'' -Status ''OK'' 2>&1 | Select-Object -First 5 | Format-Table Class, FriendlyName, InstanceId -AutoSize\")",
+      "Bash(powershell -NoProfile -ExecutionPolicy Bypass -Command \"Get-PnpDevice -Class ''XnaComposite'',''XboxComposite'',''HIDClass'' -Status ''OK'' 2>&1 | Where-Object { $_.FriendlyName -match ''controller|gamepad|joystick|xbox|xinput|game'' -or $_.InstanceId -match ''IG_'' } | Format-Table Class, FriendlyName, InstanceId -AutoSize\")",
+      "Bash(powershell -NoProfile -ExecutionPolicy Bypass -Command:*)",
+      "Bash(python test_detect.py:*)"
     ]
   }
 }
