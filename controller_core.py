@@ -41,6 +41,55 @@ import logging
 logger = logging.getLogger("retrostick")
 
 
+# ─── Controller Filtering ───────────────────────────────────────────
+
+# Name fragments that almost certainly indicate a non-controller HID device
+_NON_CONTROLLER_KEYWORDS = [
+    "mouse", "keyboard", "touchpad", "trackpad", "touch screen",
+    "webcam", "camera", "microphone", "speaker", "headset", "audio",
+    "fingerprint", "bluetooth radio", "wireless receiver", "usb hub",
+    "disk", "storage", "mass storage", "memory", "card reader",
+    "monitor", "display", "printer", "scanner",
+    "network", "ethernet", "wi-fi", "sensor",
+]
+
+# Name fragments that strongly suggest a game controller
+_CONTROLLER_KEYWORDS = [
+    "controller", "gamepad", "joystick", "arcade", "fight stick",
+    "fightstick", "xbox", "playstation", "dualshock", "dualsense",
+    "brooks", "brook", "hori", "qanba", "razer", "madcatz",
+    "8bitdo", "pro controller", "joycon", "joy-con", "xinput",
+]
+
+
+def filter_controllers_strict(controllers: List['ControllerInfo']) -> List['ControllerInfo']:
+    """Return only devices that are very likely game controllers.
+
+    Uses XInput interface markers and name-based heuristics to
+    separate real controllers from mice, keyboards, and other
+    HID devices that the broad WMI query picks up.
+    """
+    result = []
+    for ctrl in controllers:
+        # XInput devices are definitely game controllers
+        if "IG_" in ctrl.instance_id.upper():
+            result.append(ctrl)
+            continue
+
+        name = ctrl.device_name.lower()
+
+        # Skip known non-controllers
+        if any(kw in name for kw in _NON_CONTROLLER_KEYWORDS):
+            continue
+
+        # Include if name matches controller keywords
+        if any(kw in name for kw in _CONTROLLER_KEYWORDS):
+            result.append(ctrl)
+            continue
+
+    return result
+
+
 # ─── Data Classes ───────────────────────────────────────────────────
 
 @dataclass
