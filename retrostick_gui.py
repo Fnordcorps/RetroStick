@@ -38,7 +38,7 @@ from controller_core import (
     detect_controllers_wmi, find_retrobat_path, find_launchbox_path,
     write_retrostick_config, read_retrostick_config,
     apply_to_retrobat, apply_to_launchbox, run_startup_fix,
-    filter_controllers_strict,
+    filter_controllers_strict, deduplicate_physical_devices,
 )
 
 
@@ -49,7 +49,7 @@ APP_VERSION = "2.0.0"
 CONFIG_DIR = Path(os.path.expanduser("~")) / ".retrostick-fix"
 CONFIG_FILE = CONFIG_DIR / "retrostick_config.json"
 
-HOLD_DURATION = 5.0  # seconds the user must hold a button
+HOLD_DURATION = 3.0  # seconds the user must hold a button
 
 # Colour palette - arcade/retro themed
 COLORS = {
@@ -73,6 +73,33 @@ COLORS = {
 }
 
 PLAYER_LABELS = ["Player 1 (Left)", "Player 2 (Right)", "Player 3", "Player 4"]
+
+
+def _xinput_relevance(ctrl) -> int:
+    """Score a controller by how likely it is to be an XInput gamepad.
+
+    Higher = more likely.  Used to sort candidates so the best match
+    appears first and can be pre-selected / labelled "Recommended".
+    """
+    score = 0
+    name = ctrl.device_name.lower()
+    iid = ctrl.instance_id.upper()
+    # Named Xbox / XInput devices are almost certainly the right pick
+    if "xbox" in name:
+        score += 10
+    if "xinput" in name:
+        score += 8
+    if "gamepad" in name or "game controller" in name:
+        score += 5
+    if "controller" in name and "system" not in name:
+        score += 3
+    # Parent USB device (no IG_) is better than a child HID interface
+    if "&IG_" not in iid:
+        score += 2
+    # Generic "USB Input Device" or "HID-compliant" is low confidence
+    if name.startswith("usb input") or name.startswith("hid-compliant"):
+        score -= 3
+    return score
 
 
 # ─── ctypes structures for input polling ────────────────────────────
@@ -699,7 +726,7 @@ class RetroStickApp:
                                bg=COLORS["bg_card"], highlightthickness=0)
         bar_canvas.pack()
         bar_fill = bar_canvas.create_rectangle(0, 0, 0, 24, fill=color, width=0)
-        bar_text = bar_canvas.create_text(200, 12, text="0.0 / 5.0 s",
+        bar_text = bar_canvas.create_text(200, 12, text=f"0.0 / {HOLD_DURATION:.1f} s",
                                           fill=COLORS["text_primary"],
                                           font=("Consolas", 10))
 
@@ -780,12 +807,16 @@ class RetroStickApp:
                            if a.controller.instance_id}
 
             if src_type == "xinput":
-                # Only consider XInput-capable devices (IG_ in instance id)
+                # Include all game controllers (not just IG_ interfaces)
+                # so parent devices like "Xbox One Controller" are candidates
                 candidates = [
                     c for c in controllers
-                    if "IG_" in c.instance_id.upper()
-                    and c.instance_id not in assigned_ids
+                    if c.instance_id not in assigned_ids
                 ]
+                candidates = filter_controllers_strict(candidates)
+                candidates = deduplicate_physical_devices(candidates)
+                # Sort by relevance: named Xbox/XInput devices first
+                candidates.sort(key=lambda c: _xinput_relevance(c), reverse=True)
             else:
                 # WMM joystick – try to match by name
                 candidates = [
@@ -849,9 +880,64 @@ class RetroStickApp:
                  fg=COLORS["text_secondary"], bg=COLORS["bg_dark"],
                  font=("Segoe UI", 10), justify=tk.CENTER).pack(pady=(0, 10))
 
-        sel = tk.IntVar(value=-1)
-        frame = tk.Frame(dlg, bg=COLORS["bg_dark"])
-        frame.pack(fill=tk.BOTH, expand=True, padx=20)
+        # ── Button bar pinned at bottom (pack before list so it stays visible) ──
+        # Pre-select first candidate (list is sorted by relevance)
+        sel = tk.IntVar(value=0)
+
+        bar = tk.Frame(dlg, bg=COLORS["bg_dark"])
+        bar.pack(side=tk.BOTTOM, fill=tk.X, padx=20, pady=12)
+
+        def _ok():
+            i = sel.get()
+            if i < 0 or i >= len(candidates):
+                messagebox.showinfo("Select", "Please select a controller.")
+                return
+            if src_type == "xinput" and src_id is not None:
+                candidates[i].xinput_index = src_id
+            canvas.unbind_all("<MouseWheel>")
+            dlg.destroy()
+            self._assign_controller(player_num, candidates[i])
+            self._set_status(
+                f"{candidates[i].display_name} assigned to "
+                f"{PLAYER_LABELS[player_num - 1]}", "success")
+
+        def _cancel():
+            canvas.unbind_all("<MouseWheel>")
+            dlg.destroy()
+
+        tk.Button(bar, text="Apply", bg=COLORS["accent_green"],
+                  fg=COLORS["bg_dark"],
+                  font=("Segoe UI", 11, "bold"), relief=tk.FLAT,
+                  command=_ok, cursor="hand2",
+                  padx=24, pady=6).pack(side=tk.RIGHT)
+        tk.Button(bar, text="Cancel", bg=COLORS["bg_card"],
+                  fg=COLORS["text_primary"], font=("Segoe UI", 10),
+                  relief=tk.FLAT, command=_cancel, cursor="hand2",
+                  padx=15, pady=4).pack(side=tk.RIGHT, padx=(0, 8))
+
+        # ── Scrollable controller list ──
+        list_outer = tk.Frame(dlg, bg=COLORS["bg_dark"])
+        list_outer.pack(fill=tk.BOTH, expand=True, padx=20)
+
+        canvas = tk.Canvas(list_outer, bg=COLORS["bg_dark"],
+                           highlightthickness=0)
+        scrollbar = tk.Scrollbar(list_outer, orient=tk.VERTICAL,
+                                 command=canvas.yview,
+                                 bg=COLORS["bg_card"],
+                                 troughcolor=COLORS["bg_dark"])
+        inner = tk.Frame(canvas, bg=COLORS["bg_dark"])
+
+        inner.bind("<Configure>",
+                   lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=inner, anchor=tk.NW)
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
 
         # Count duplicate names so we can number them
         name_counts = {}
@@ -861,7 +947,7 @@ class RetroStickApp:
         name_indices = {}
 
         for idx, ctrl in enumerate(candidates):
-            row = tk.Frame(frame, bg=COLORS["bg_card"], padx=12, pady=8,
+            row = tk.Frame(inner, bg=COLORS["bg_card"], padx=12, pady=8,
                            cursor="hand2")
             row.pack(fill=tk.X, pady=2)
             tk.Radiobutton(row, variable=sel, value=idx,
@@ -879,9 +965,16 @@ class RetroStickApp:
                 name_indices[ctrl.display_name] = dev_idx
                 label = f"{ctrl.display_name} - Device #{dev_idx}"
 
-            tk.Label(inf, text=label,
+            name_row = tk.Frame(inf, bg=COLORS["bg_card"])
+            name_row.pack(fill=tk.X)
+            tk.Label(name_row, text=label,
                      fg=COLORS["text_primary"], bg=COLORS["bg_card"],
-                     font=("Consolas", 10, "bold"), anchor=tk.W).pack(fill=tk.X)
+                     font=("Consolas", 10, "bold"), anchor=tk.W).pack(side=tk.LEFT)
+            if idx == 0:
+                tk.Label(name_row, text="  Recommended",
+                         fg=COLORS["accent_green"], bg=COLORS["bg_card"],
+                         font=("Consolas", 9, "bold"),
+                         anchor=tk.W).pack(side=tk.LEFT)
 
             # Show port/serial info for differentiation
             port_info = ctrl.serial if ctrl.serial else "N/A"
@@ -895,35 +988,9 @@ class RetroStickApp:
             tk.Label(inf, text=hw, fg=COLORS["text_dim"], bg=COLORS["bg_card"],
                      font=("Consolas", 8), anchor=tk.W).pack(fill=tk.X)
             for w in [row, inf] + inf.winfo_children():
-                w.bind("<Button-1>", lambda e, i=idx: sel.set(i))
+                w.bind("<Button-1>", lambda _e, i=idx: sel.set(i))
 
-        bar = tk.Frame(dlg, bg=COLORS["bg_dark"])
-        bar.pack(fill=tk.X, padx=20, pady=12)
-
-        def _ok():
-            i = sel.get()
-            if i < 0 or i >= len(candidates):
-                messagebox.showinfo("Select", "Please select a controller.")
-                return
-            if src_type == "xinput" and src_id is not None:
-                candidates[i].xinput_index = src_id
-            dlg.destroy()
-            self._assign_controller(player_num, candidates[i])
-            self._set_status(
-                f"{candidates[i].display_name} assigned to "
-                f"{PLAYER_LABELS[player_num - 1]}", "success")
-
-        tk.Button(bar, text="Apply", bg=COLORS["accent_green"],
-                  fg=COLORS["bg_dark"],
-                  font=("Segoe UI", 11, "bold"), relief=tk.FLAT,
-                  command=_ok, cursor="hand2",
-                  padx=24, pady=6).pack(side=tk.RIGHT)
-        tk.Button(bar, text="Cancel", bg=COLORS["bg_card"],
-                  fg=COLORS["text_primary"], font=("Segoe UI", 10),
-                  relief=tk.FLAT, command=dlg.destroy, cursor="hand2",
-                  padx=15, pady=4).pack(side=tk.RIGHT, padx=(0, 8))
-
-        dlg.protocol("WM_DELETE_WINDOW", dlg.destroy)
+        dlg.protocol("WM_DELETE_WINDOW", _cancel)
 
     # ── manual select (scrollable, filtered list) ───────────────
 
@@ -950,6 +1017,8 @@ class RetroStickApp:
             return
 
         color = COLORS["player_colors"][player_num - 1]
+        # Collapse multiple XInput interfaces per physical device
+        all_controllers = deduplicate_physical_devices(all_controllers)
         strict = filter_controllers_strict(all_controllers)
 
         dlg = tk.Toplevel(self.root)
@@ -972,7 +1041,68 @@ class RetroStickApp:
                  fg=COLORS["text_secondary"], bg=COLORS["bg_dark"],
                  font=("Segoe UI", 10)).pack(pady=(0, 8))
 
-        # Scrollable list area
+        # State for list population
+        selected_var = tk.IntVar(value=-1)
+        show_all_var = tk.BooleanVar(value=False)
+        displayed_controllers: List[ControllerInfo] = []
+
+        # ── Bottom controls pinned (pack before list so they stay visible) ──
+        n_strict = len([c for c in strict
+                        if c.instance_id not in
+                        {a.controller.instance_id for a in self.assignments
+                         if a.controller.instance_id}])
+        n_all = len([c for c in all_controllers
+                     if c.instance_id not in
+                     {a.controller.instance_id for a in self.assignments
+                      if a.controller.instance_id}])
+
+        bar = tk.Frame(dlg, bg=COLORS["bg_dark"])
+        bar.pack(side=tk.BOTTOM, fill=tk.X, padx=20, pady=12)
+
+        def _confirm():
+            i = selected_var.get()
+            if i < 0 or i >= len(displayed_controllers):
+                messagebox.showinfo("Select", "Please select a controller.")
+                return
+            ctrl = displayed_controllers[i]
+            canvas.unbind_all("<MouseWheel>")
+            dlg.destroy()
+            self._assign_controller(player_num, ctrl)
+            self._set_status(
+                f"{ctrl.display_name} assigned to "
+                f"{PLAYER_LABELS[player_num - 1]}", "success")
+
+        def _close():
+            canvas.unbind_all("<MouseWheel>")
+            dlg.destroy()
+
+        tk.Button(bar, text="Apply", bg=COLORS["accent_green"],
+                  fg=COLORS["bg_dark"],
+                  font=("Segoe UI", 11, "bold"), relief=tk.FLAT,
+                  command=_confirm, cursor="hand2",
+                  padx=24, pady=6).pack(side=tk.RIGHT)
+        tk.Button(bar, text="Cancel", bg=COLORS["bg_card"],
+                  fg=COLORS["text_primary"], font=("Segoe UI", 10),
+                  relief=tk.FLAT, command=_close, cursor="hand2",
+                  padx=15, pady=4).pack(side=tk.RIGHT, padx=(0, 8))
+
+        chk_frame = tk.Frame(dlg, bg=COLORS["bg_dark"])
+        chk_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=20, pady=(6, 0))
+
+        chk = tk.Checkbutton(
+            chk_frame,
+            text=f"Show all devices ({n_all} total, {n_strict} likely controllers)",
+            variable=show_all_var,
+            bg=COLORS["bg_dark"], fg=COLORS["text_secondary"],
+            selectcolor=COLORS["bg_card"],
+            activebackground=COLORS["bg_dark"],
+            activeforeground=COLORS["text_secondary"],
+            font=("Segoe UI", 9),
+            command=lambda: _populate(show_all_var.get()),
+        )
+        chk.pack(anchor=tk.W)
+
+        # ── Scrollable list area (fills remaining space) ──
         list_outer = tk.Frame(dlg, bg=COLORS["bg_dark"])
         list_outer.pack(fill=tk.BOTH, expand=True, padx=20)
 
@@ -985,23 +1115,16 @@ class RetroStickApp:
         inner = tk.Frame(canvas, bg=COLORS["bg_dark"])
 
         inner.bind("<Configure>",
-                   lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+                   lambda _e: canvas.configure(scrollregion=canvas.bbox("all")))
         canvas.create_window((0, 0), window=inner, anchor=tk.NW)
         canvas.configure(yscrollcommand=scrollbar.set)
 
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
-        # Mouse-wheel scrolling
         def _on_mousewheel(event):
             canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-
         canvas.bind_all("<MouseWheel>", _on_mousewheel)
-
-        # State for list population
-        selected_var = tk.IntVar(value=-1)
-        show_all_var = tk.BooleanVar(value=False)
-        displayed_controllers: List[ControllerInfo] = []
 
         def _populate(show_all: bool):
             nonlocal displayed_controllers
@@ -1009,7 +1132,6 @@ class RetroStickApp:
                 w.destroy()
 
             source = all_controllers if show_all else (strict or all_controllers)
-            # Filter out already-assigned controllers
             assigned_ids = {a.controller.instance_id
                            for a in self.assignments
                            if a.controller.instance_id}
@@ -1023,7 +1145,6 @@ class RetroStickApp:
                          font=("Segoe UI", 10)).pack(pady=20)
                 return
 
-            # Count duplicate names for numbering
             name_counts = {}
             for ctrl in avail:
                 n = ctrl.display_name
@@ -1045,7 +1166,6 @@ class RetroStickApp:
                 inf = tk.Frame(row, bg=COLORS["bg_card"])
                 inf.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
 
-                # Add device number when names are identical
                 label = ctrl.display_name
                 if name_counts.get(ctrl.display_name, 1) > 1:
                     dev_idx = name_indices.get(ctrl.display_name, 0) + 1
@@ -1057,7 +1177,6 @@ class RetroStickApp:
                          font=("Consolas", 10, "bold"),
                          anchor=tk.W).pack(fill=tk.X)
 
-                # Show port/serial info for differentiation
                 port_info = ctrl.serial if ctrl.serial else "N/A"
                 tk.Label(inf, text=f"Port/Serial: {port_info}",
                          fg=COLORS["text_secondary"], bg=COLORS["bg_card"],
@@ -1071,70 +1190,11 @@ class RetroStickApp:
                          font=("Consolas", 8), anchor=tk.W).pack(fill=tk.X)
 
                 for w in [row, inf] + inf.winfo_children():
-                    w.bind("<Button-1>", lambda e, i=idx: selected_var.set(i))
+                    w.bind("<Button-1>", lambda _e, i=idx: selected_var.set(i))
 
-            # Reset scroll position
             canvas.yview_moveto(0)
 
         _populate(False)
-
-        # "Show all devices" checkbox
-        chk_frame = tk.Frame(dlg, bg=COLORS["bg_dark"])
-        chk_frame.pack(fill=tk.X, padx=20, pady=(6, 0))
-
-        n_strict = len([c for c in strict
-                        if c.instance_id not in
-                        {a.controller.instance_id for a in self.assignments
-                         if a.controller.instance_id}])
-        n_all = len([c for c in all_controllers
-                     if c.instance_id not in
-                     {a.controller.instance_id for a in self.assignments
-                      if a.controller.instance_id}])
-
-        chk = tk.Checkbutton(
-            chk_frame,
-            text=f"Show all devices ({n_all} total, {n_strict} likely controllers)",
-            variable=show_all_var,
-            bg=COLORS["bg_dark"], fg=COLORS["text_secondary"],
-            selectcolor=COLORS["bg_card"],
-            activebackground=COLORS["bg_dark"],
-            activeforeground=COLORS["text_secondary"],
-            font=("Segoe UI", 9),
-            command=lambda: _populate(show_all_var.get()),
-        )
-        chk.pack(anchor=tk.W)
-
-        # Buttons
-        bar = tk.Frame(dlg, bg=COLORS["bg_dark"])
-        bar.pack(fill=tk.X, padx=20, pady=12)
-
-        def _confirm():
-            i = selected_var.get()
-            if i < 0 or i >= len(displayed_controllers):
-                messagebox.showinfo("Select", "Please select a controller.")
-                return
-            ctrl = displayed_controllers[i]
-            # Unbind mousewheel before closing
-            canvas.unbind_all("<MouseWheel>")
-            dlg.destroy()
-            self._assign_controller(player_num, ctrl)
-            self._set_status(
-                f"{ctrl.display_name} assigned to "
-                f"{PLAYER_LABELS[player_num - 1]}", "success")
-
-        def _close():
-            canvas.unbind_all("<MouseWheel>")
-            dlg.destroy()
-
-        tk.Button(bar, text="Apply", bg=COLORS["accent_green"],
-                  fg=COLORS["bg_dark"],
-                  font=("Segoe UI", 11, "bold"), relief=tk.FLAT,
-                  command=_confirm, cursor="hand2",
-                  padx=24, pady=6).pack(side=tk.RIGHT)
-        tk.Button(bar, text="Cancel", bg=COLORS["bg_card"],
-                  fg=COLORS["text_primary"], font=("Segoe UI", 10),
-                  relief=tk.FLAT, command=_close, cursor="hand2",
-                  padx=15, pady=4).pack(side=tk.RIGHT, padx=(0, 8))
 
         dlg.protocol("WM_DELETE_WINDOW", _close)
         self._set_status(
@@ -1502,7 +1562,7 @@ class RetroStickApp:
              "two methods:")
         bullet("Auto Detect - press and hold any button or move the "
                "stick on the controller you want for that player. Hold "
-               "for 5 seconds until it is recognised.")
+               f"for {HOLD_DURATION:.0f} seconds until it is recognised.")
         bullet("Manual Select - pick from a list of all detected "
                "controllers. Useful if auto-detect has trouble "
                "differentiating identical devices.")

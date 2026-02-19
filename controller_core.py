@@ -51,14 +51,22 @@ _NON_CONTROLLER_KEYWORDS = [
     "disk", "storage", "mass storage", "memory", "card reader",
     "monitor", "display", "printer", "scanner",
     "network", "ethernet", "wi-fi", "sensor",
+    "system controller", "host controller", "sata", "raid",
+    "smbus", "spi", "i2c", "gpio",
 ]
 
 # Name fragments that strongly suggest a game controller
 _CONTROLLER_KEYWORDS = [
-    "controller", "gamepad", "joystick", "arcade", "fight stick",
+    "game controller", "gamepad", "joystick", "arcade", "fight stick",
     "fightstick", "xbox", "playstation", "dualshock", "dualsense",
-    "brooks", "brook", "hori", "qanba", "razer", "madcatz",
+    "brooks", "brook", "hori", "qanba", "madcatz",
     "8bitdo", "pro controller", "joycon", "joy-con", "xinput",
+    "ultimarc", "i-pac", "ipac", "j-pac", "jpac",  # Ultimarc encoder boards
+    "x-arcade", "xarcade",                          # X-Arcade sticks
+    "zero delay", "dragonrise",                     # Generic Chinese encoders
+    "saitek", "logitech", "thrustmaster",           # Flight sticks / wheels
+    "switch", "wii",                                # Nintendo
+    "steering wheel", "racing wheel", "flight",     # Specialty controllers
 ]
 
 
@@ -71,15 +79,16 @@ def filter_controllers_strict(controllers: List['ControllerInfo']) -> List['Cont
     """
     result = []
     for ctrl in controllers:
-        # XInput devices are definitely game controllers
-        if "IG_" in ctrl.instance_id.upper():
-            result.append(ctrl)
-            continue
-
         name = ctrl.device_name.lower()
 
-        # Skip known non-controllers
+        # Skip known non-controllers even if they have IG_ in the
+        # instance ID (e.g. Xbox chatpad/keyboard interface IG_02)
         if any(kw in name for kw in _NON_CONTROLLER_KEYWORDS):
+            continue
+
+        # XInput interface devices are game controllers
+        if "IG_" in ctrl.instance_id.upper():
+            result.append(ctrl)
             continue
 
         # Include if name matches controller keywords
@@ -88,6 +97,55 @@ def filter_controllers_strict(controllers: List['ControllerInfo']) -> List['Cont
             continue
 
     return result
+
+
+def deduplicate_physical_devices(controllers: List['ControllerInfo']) -> List['ControllerInfo']:
+    """Collapse multiple XInput interfaces into one entry per physical device.
+
+    A single physical controller (e.g. an Xbox 360 pad) often registers
+    multiple XInput interfaces in Windows (IG_00, IG_03, etc.).  WMI
+    returns each interface as a separate entry, which confuses users
+    during assignment.
+
+    Strategy:
+    1. Separate entries into "parent" (no &IG_ - the physical USB device)
+       and "interface" (has &IG_ - HID child interfaces).
+    2. For any VID+PID that has parent entries, discard the IG_ children
+       since the parents already represent the physical devices.
+    3. For remaining IG_-only entries, group by VID+PID and keep one
+       representative per group.
+    """
+    parents: List['ControllerInfo'] = []
+    interfaces: List['ControllerInfo'] = []
+
+    for ctrl in controllers:
+        if '&IG_' in ctrl.instance_id.upper():
+            interfaces.append(ctrl)
+        else:
+            parents.append(ctrl)
+
+    # VID+PID combos that already have parent (physical device) entries
+    parent_vidpid: set = set()
+    for c in parents:
+        if c.vid and c.pid:
+            parent_vidpid.add((c.vid.upper(), c.pid.upper()))
+
+    # Keep only orphan interfaces (no parent entry for that VID+PID)
+    orphans: List['ControllerInfo'] = [
+        c for c in interfaces
+        if not c.vid or not c.pid
+        or (c.vid.upper(), c.pid.upper()) not in parent_vidpid
+    ]
+
+    # Deduplicate orphans: keep one entry per VID+PID
+    seen_vidpid: set = set()
+    for ctrl in orphans:
+        key = (ctrl.vid.upper(), ctrl.pid.upper()) if ctrl.vid and ctrl.pid else ctrl.instance_id
+        if key not in seen_vidpid:
+            seen_vidpid.add(key)
+            parents.append(ctrl)
+
+    return parents
 
 
 # ─── Data Classes ───────────────────────────────────────────────────
@@ -285,63 +343,46 @@ def detect_controllers_wmi() -> List[ControllerInfo]:
         ps_script = '''
 $ErrorActionPreference = "SilentlyContinue"
 
-# Method 1: Get XInput/HID game controllers via PnP
-$gameControllers = @()
-
-# Get devices from "Xbox Gaming Device" and HID game controllers
+# Get XInput/HID game controllers via PnP
 $hidDevices = Get-PnpDevice -Class "XnaComposite","XboxComposite","HIDClass" -Status "OK" 2>$null
-$usbDevices = Get-PnpDevice -Class "USB" -Status "OK" 2>$null
-
-# Also check via WMI for game controllers
-$wmiControllers = Get-WmiObject -Class Win32_PnPEntity | Where-Object {
-    $_.PNPClass -match "XInput|HID" -or
-    $_.Name -match "controller|gamepad|joystick|arcade|xbox|playstation|xinput" -or
-    $_.Compatible -match "HID_DEVICE_SYSTEM_GAME"
-} 2>$null
-
-# Combine and deduplicate
-$allDevices = @()
-if ($hidDevices) { $allDevices += $hidDevices }
-if ($wmiControllers) { $allDevices += $wmiControllers }
 
 $seen = @{}
-foreach ($dev in $allDevices) {
-    $instanceId = if ($dev.InstanceId) { $dev.InstanceId } else { $dev.DeviceID }
+foreach ($dev in $hidDevices) {
+    $instanceId = $dev.InstanceId
     if (-not $instanceId -or $seen.ContainsKey($instanceId)) { continue }
-    
-    $name = if ($dev.FriendlyName) { $dev.FriendlyName } 
-            elseif ($dev.Name) { $dev.Name }
-            else { "Unknown" }
-    
+
+    $devName = $dev.FriendlyName
+    if (-not $devName) { $devName = "Unknown" }
+
     # Filter to likely game controllers
     $isController = $false
-    if ($name -match "controller|gamepad|joystick|arcade|xbox|playstation|xinput|game|brooks|brook|encoder|stick") {
+    if ($devName -match "controller|gamepad|joystick|arcade|xbox|playstation|xinput|game|brooks|brook|encoder|stick") {
         $isController = $true
     }
     if ($instanceId -match "IG_") {
-        $isController = $true  # XInput interface
+        $isController = $true
     }
-    
+
     if ($isController) {
         $seen[$instanceId] = $true
-        
-        # Extract VID and PID
-        $vid = ""
-        $pid = ""
-        $serial = ""
-        if ($instanceId -match "VID_([0-9A-Fa-f]{4})") { $vid = $Matches[1] }
-        if ($instanceId -match "PID_([0-9A-Fa-f]{4})") { $pid = $Matches[1] }
-        
+
+        # Extract VID and PID (avoid $pid - reserved in PowerShell)
+        $devVid = ""
+        $devPid = ""
+        $devSerial = ""
+        if ($instanceId -match "VID_([0-9A-Fa-f]{4})") { $devVid = $Matches[1] }
+        if ($instanceId -match "PID_([0-9A-Fa-f]{4})") { $devPid = $Matches[1] }
+
         # Extract serial/instance portion (after the last backslash)
         $parts = $instanceId -split "\\\\"
-        if ($parts.Count -ge 3) { $serial = $parts[-1] }
-        
+        if ($parts.Count -ge 3) { $devSerial = $parts[-1] }
+
         $obj = [PSCustomObject]@{
-            Name = $name
+            Name = $devName
             InstanceId = $instanceId
-            VID = $vid.ToUpper()
-            PID = $pid.ToUpper()
-            Serial = $serial
+            VID = $devVid.ToUpper()
+            PID = $devPid.ToUpper()
+            Serial = $devSerial
         }
         Write-Output ($obj | ConvertTo-Json -Compress)
     }
