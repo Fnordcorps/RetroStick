@@ -35,9 +35,9 @@ from typing import List, Optional, Callable
 # Import our core module
 from controller_core import (
     ControllerInfo, PlayerAssignment,
-    detect_controllers_wmi, find_retrobat_path,
+    detect_controllers_wmi, find_retrobat_path, find_launchbox_path,
     write_retrostick_config, read_retrostick_config,
-    apply_to_retrobat, run_startup_fix,
+    apply_to_retrobat, apply_to_launchbox, run_startup_fix,
     filter_controllers_strict,
 )
 
@@ -45,7 +45,7 @@ from controller_core import (
 # ─── Constants ──────────────────────────────────────────────────────
 
 APP_NAME = "RetroStick Fix"
-APP_VERSION = "1.1.0"
+APP_VERSION = "2.0.0"
 CONFIG_DIR = Path(os.path.expanduser("~")) / ".retrostick-fix"
 CONFIG_FILE = CONFIG_DIR / "retrostick_config.json"
 
@@ -315,6 +315,7 @@ class RetroStickApp:
 
         # State
         self.retrobat_path: Optional[Path] = None
+        self.launchbox_path: Optional[Path] = None
         self.assignments: List[PlayerAssignment] = []
         self.detected_controllers: List[ControllerInfo] = []
         self.num_players = 2
@@ -326,8 +327,8 @@ class RetroStickApp:
         # Build UI
         self._build_ui()
 
-        # Auto-detect RetroBat path
-        self.root.after(500, self._auto_detect_retrobat)
+        # Auto-detect frontend path
+        self.root.after(500, self._auto_detect_frontend_path)
 
     # ── window chrome ───────────────────────────────────────────
 
@@ -337,6 +338,15 @@ class RetroStickApp:
         x = (self.root.winfo_screenwidth() - w) // 2
         y = (self.root.winfo_screenheight() - h) // 2
         self.root.geometry(f"{w}x{h}+{x}+{y}")
+
+        # Set window icon
+        try:
+            base = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+            ico_path = os.path.join(base, "retrostick.ico")
+            if os.path.isfile(ico_path):
+                self.root.iconbitmap(ico_path)
+        except Exception:
+            pass
 
         if sys.platform == "win32":
             try:
@@ -412,16 +422,56 @@ class RetroStickApp:
         header = ttk.Frame(main, style="Dark.TFrame")
         header.pack(fill=tk.X, pady=(0, 15))
 
-        ttk.Label(header, text="RETROSTICK FIX", style="Title.TLabel").pack(anchor=tk.W)
-        ttk.Label(header,
+        header_left = ttk.Frame(header, style="Dark.TFrame")
+        header_left.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Label(header_left, text="RETROSTICK FIX", style="Title.TLabel").pack(anchor=tk.W)
+        ttk.Label(header_left,
                   text="Persistent arcade controller assignment for RetroBat / LaunchBox / EmulationStation",
                   style="Subtitle.TLabel").pack(anchor=tk.W)
 
-        # ── RetroBat Path ──
+        tk.Button(header, text="?  Help", bg=COLORS["bg_card"],
+                  fg=COLORS["accent_yellow"], relief=tk.FLAT,
+                  font=("Consolas", 11, "bold"), cursor="hand2",
+                  activebackground=COLORS["bg_card_hover"],
+                  activeforeground=COLORS["accent_yellow"],
+                  padx=14, pady=4,
+                  command=self._show_help).pack(side=tk.RIGHT, anchor=tk.NE)
+
+        # ── Target Frontend ──
+        frontend_frame = ttk.Frame(main, style="Dark.TFrame")
+        frontend_frame.pack(fill=tk.X, pady=(0, 8))
+
+        ttk.Label(frontend_frame, text="Target Frontend:",
+                  style="Dark.TLabel").pack(side=tk.LEFT)
+
+        self.frontend_var = tk.StringVar(
+            value=getattr(self, '_saved_frontend', 'retrobat'))
+        tk.Radiobutton(frontend_frame, text="RetroBat",
+                       variable=self.frontend_var, value="retrobat",
+                       bg=COLORS["bg_dark"], fg=COLORS["accent_blue"],
+                       selectcolor=COLORS["bg_card"],
+                       activebackground=COLORS["bg_dark"],
+                       activeforeground=COLORS["accent_blue"],
+                       font=("Consolas", 11, "bold"),
+                       command=self._on_frontend_change,
+                       cursor="hand2").pack(side=tk.LEFT, padx=(15, 0))
+        tk.Radiobutton(frontend_frame, text="LaunchBox / BigBox",
+                       variable=self.frontend_var, value="launchbox",
+                       bg=COLORS["bg_dark"], fg=COLORS["accent_orange"],
+                       selectcolor=COLORS["bg_card"],
+                       activebackground=COLORS["bg_dark"],
+                       activeforeground=COLORS["accent_orange"],
+                       font=("Consolas", 11, "bold"),
+                       command=self._on_frontend_change,
+                       cursor="hand2").pack(side=tk.LEFT, padx=(15, 0))
+
+        # ── Frontend Path ──
         path_frame = ttk.Frame(main, style="Dark.TFrame")
         path_frame.pack(fill=tk.X, pady=(0, 10))
 
-        ttk.Label(path_frame, text="RetroBat Path:", style="Dark.TLabel").pack(side=tk.LEFT)
+        self.path_label = ttk.Label(path_frame, text="RetroBat Path:",
+                                    style="Dark.TLabel")
+        self.path_label.pack(side=tk.LEFT)
 
         self.path_var = tk.StringVar(value="Searching...")
         self.path_entry = tk.Entry(path_frame, textvariable=self.path_var,
@@ -433,7 +483,7 @@ class RetroStickApp:
         tk.Button(path_frame, text="Browse",
                   bg=COLORS["bg_card"], fg=COLORS["text_primary"],
                   relief=tk.FLAT, font=("Segoe UI", 9),
-                  command=self._browse_retrobat,
+                  command=self._browse_path,
                   cursor="hand2").pack(side=tk.RIGHT)
 
         # ── Player Count ──
@@ -589,6 +639,30 @@ class RetroStickApp:
         self.num_players = self.player_count_var.get()
         self._rebuild_player_cards()
 
+    def _on_frontend_change(self):
+        frontend = self.frontend_var.get()
+        if frontend == "retrobat":
+            self.path_label.config(text="RetroBat Path:")
+            if self.retrobat_path:
+                self.path_var.set(str(self.retrobat_path))
+            else:
+                self.path_var.set("")
+                self.root.after(100, self._auto_detect_retrobat)
+        else:
+            self.path_label.config(text="LaunchBox Path:")
+            if self.launchbox_path:
+                self.path_var.set(str(self.launchbox_path))
+            else:
+                self.path_var.set("")
+                self.root.after(100, self._auto_detect_launchbox)
+
+    def _auto_detect_frontend_path(self):
+        frontend = self.frontend_var.get()
+        if frontend == "retrobat":
+            self._auto_detect_retrobat()
+        else:
+            self._auto_detect_launchbox()
+
     # ── auto-detect (hold button for N seconds) ─────────────────
 
     def _auto_detect_for_player(self, player_num: int):
@@ -725,14 +799,17 @@ class RetroStickApp:
                                   if c.instance_id not in assigned_ids]
 
             if len(candidates) == 1:
-                # Unambiguous match
+                # Unambiguous match – store XInput index if applicable
+                if src_type == "xinput":
+                    candidates[0].xinput_index = src_id
                 self._assign_controller(player_num, candidates[0])
                 self._set_status(
                     f"Auto-detected: {candidates[0].display_name} assigned to "
                     f"{PLAYER_LABELS[player_num - 1]}", "success")
             elif len(candidates) > 1:
                 # Ambiguous – let the user pick from the short list
-                self._show_disambiguation_picker(player_num, candidates, src_name)
+                self._show_disambiguation_picker(
+                    player_num, candidates, src_name, src_type, src_id)
             else:
                 # Nothing matched – fall back to full manual list
                 messagebox.showwarning(
@@ -745,20 +822,22 @@ class RetroStickApp:
 
     def _show_disambiguation_picker(self, player_num: int,
                                      candidates: List[ControllerInfo],
-                                     src_name: str):
+                                     src_name: str,
+                                     src_type: str = None,
+                                     src_id: int = None):
         """Show a short picker when auto-detect is ambiguous."""
         color = COLORS["player_colors"][player_num - 1]
 
         dlg = tk.Toplevel(self.root)
-        dlg.title(f"Confirm Controller - {PLAYER_LABELS[player_num - 1]}")
-        dlg.geometry("550x350")
+        dlg.title(f"Select Controller - {PLAYER_LABELS[player_num - 1]}")
+        dlg.geometry("580x420")
         dlg.configure(bg=COLORS["bg_dark"])
         dlg.transient(self.root)
         dlg.grab_set()
 
         dlg.update_idletasks()
-        px = self.root.winfo_x() + (self.root.winfo_width() - 550) // 2
-        py = self.root.winfo_y() + (self.root.winfo_height() - 350) // 2
+        px = self.root.winfo_x() + (self.root.winfo_width() - 580) // 2
+        py = self.root.winfo_y() + (self.root.winfo_height() - 420) // 2
         dlg.geometry(f"+{px}+{py}")
 
         tk.Label(dlg, text=f"● {PLAYER_LABELS[player_num - 1]}",
@@ -774,6 +853,13 @@ class RetroStickApp:
         frame = tk.Frame(dlg, bg=COLORS["bg_dark"])
         frame.pack(fill=tk.BOTH, expand=True, padx=20)
 
+        # Count duplicate names so we can number them
+        name_counts = {}
+        for ctrl in candidates:
+            n = ctrl.display_name
+            name_counts[n] = name_counts.get(n, 0) + 1
+        name_indices = {}
+
         for idx, ctrl in enumerate(candidates):
             row = tk.Frame(frame, bg=COLORS["bg_card"], padx=12, pady=8,
                            cursor="hand2")
@@ -785,12 +871,27 @@ class RetroStickApp:
                            cursor="hand2").pack(side=tk.LEFT)
             inf = tk.Frame(row, bg=COLORS["bg_card"])
             inf.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
-            tk.Label(inf, text=ctrl.display_name,
+
+            # Add device number when names are identical
+            label = ctrl.display_name
+            if name_counts.get(ctrl.display_name, 1) > 1:
+                dev_idx = name_indices.get(ctrl.display_name, 0) + 1
+                name_indices[ctrl.display_name] = dev_idx
+                label = f"{ctrl.display_name} - Device #{dev_idx}"
+
+            tk.Label(inf, text=label,
                      fg=COLORS["text_primary"], bg=COLORS["bg_card"],
                      font=("Consolas", 10, "bold"), anchor=tk.W).pack(fill=tk.X)
+
+            # Show port/serial info for differentiation
+            port_info = ctrl.serial if ctrl.serial else "N/A"
+            tk.Label(inf, text=f"Port/Serial: {port_info}",
+                     fg=COLORS["text_secondary"], bg=COLORS["bg_card"],
+                     font=("Consolas", 8), anchor=tk.W).pack(fill=tk.X)
+
             hw = ctrl.hardware_id
-            if len(hw) > 55:
-                hw = hw[:52] + "..."
+            if len(hw) > 60:
+                hw = hw[:57] + "..."
             tk.Label(inf, text=hw, fg=COLORS["text_dim"], bg=COLORS["bg_card"],
                      font=("Consolas", 8), anchor=tk.W).pack(fill=tk.X)
             for w in [row, inf] + inf.winfo_children():
@@ -804,16 +905,19 @@ class RetroStickApp:
             if i < 0 or i >= len(candidates):
                 messagebox.showinfo("Select", "Please select a controller.")
                 return
+            if src_type == "xinput" and src_id is not None:
+                candidates[i].xinput_index = src_id
             dlg.destroy()
             self._assign_controller(player_num, candidates[i])
             self._set_status(
                 f"{candidates[i].display_name} assigned to "
                 f"{PLAYER_LABELS[player_num - 1]}", "success")
 
-        tk.Button(bar, text="Confirm", bg=color, fg=COLORS["bg_dark"],
-                  font=("Segoe UI", 10, "bold"), relief=tk.FLAT,
+        tk.Button(bar, text="Apply", bg=COLORS["accent_green"],
+                  fg=COLORS["bg_dark"],
+                  font=("Segoe UI", 11, "bold"), relief=tk.FLAT,
                   command=_ok, cursor="hand2",
-                  padx=20, pady=4).pack(side=tk.RIGHT)
+                  padx=24, pady=6).pack(side=tk.RIGHT)
         tk.Button(bar, text="Cancel", bg=COLORS["bg_card"],
                   fg=COLORS["text_primary"], font=("Segoe UI", 10),
                   relief=tk.FLAT, command=dlg.destroy, cursor="hand2",
@@ -919,6 +1023,13 @@ class RetroStickApp:
                          font=("Segoe UI", 10)).pack(pady=20)
                 return
 
+            # Count duplicate names for numbering
+            name_counts = {}
+            for ctrl in avail:
+                n = ctrl.display_name
+                name_counts[n] = name_counts.get(n, 0) + 1
+            name_indices = {}
+
             for idx, ctrl in enumerate(avail):
                 row = tk.Frame(inner, bg=COLORS["bg_card"],
                                padx=12, pady=8, cursor="hand2")
@@ -934,10 +1045,23 @@ class RetroStickApp:
                 inf = tk.Frame(row, bg=COLORS["bg_card"])
                 inf.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(5, 0))
 
-                tk.Label(inf, text=ctrl.display_name,
+                # Add device number when names are identical
+                label = ctrl.display_name
+                if name_counts.get(ctrl.display_name, 1) > 1:
+                    dev_idx = name_indices.get(ctrl.display_name, 0) + 1
+                    name_indices[ctrl.display_name] = dev_idx
+                    label = f"{ctrl.display_name} - Device #{dev_idx}"
+
+                tk.Label(inf, text=label,
                          fg=COLORS["text_primary"], bg=COLORS["bg_card"],
                          font=("Consolas", 10, "bold"),
                          anchor=tk.W).pack(fill=tk.X)
+
+                # Show port/serial info for differentiation
+                port_info = ctrl.serial if ctrl.serial else "N/A"
+                tk.Label(inf, text=f"Port/Serial: {port_info}",
+                         fg=COLORS["text_secondary"], bg=COLORS["bg_card"],
+                         font=("Consolas", 8), anchor=tk.W).pack(fill=tk.X)
 
                 hw = ctrl.hardware_id
                 if len(hw) > 60:
@@ -1002,10 +1126,11 @@ class RetroStickApp:
             canvas.unbind_all("<MouseWheel>")
             dlg.destroy()
 
-        tk.Button(bar, text="Confirm", bg=color, fg=COLORS["bg_dark"],
-                  font=("Segoe UI", 10, "bold"), relief=tk.FLAT,
+        tk.Button(bar, text="Apply", bg=COLORS["accent_green"],
+                  fg=COLORS["bg_dark"],
+                  font=("Segoe UI", 11, "bold"), relief=tk.FLAT,
                   command=_confirm, cursor="hand2",
-                  padx=20, pady=4).pack(side=tk.RIGHT)
+                  padx=24, pady=6).pack(side=tk.RIGHT)
         tk.Button(bar, text="Cancel", bg=COLORS["bg_card"],
                   fg=COLORS["text_primary"], font=("Segoe UI", 10),
                   relief=tk.FLAT, command=_close, cursor="hand2",
@@ -1054,28 +1179,67 @@ class RetroStickApp:
                 "RetroBat not auto-detected. Use Browse to set the folder.",
                 "warning")
 
-    def _browse_retrobat(self):
-        folder = filedialog.askdirectory(
-            title="Select RetroBat Installation Folder")
-        if folder:
-            path = Path(folder)
-            if ((path / "retrobat.exe").exists()
-                    or (path / "retrobat-new.exe").exists()):
-                self.retrobat_path = path
-                self.path_var.set(str(path))
-                self._set_status(f"RetroBat path set: {path}", "success")
-            else:
+    def _auto_detect_launchbox(self):
+        if self.launchbox_path and self.launchbox_path.exists():
+            self.path_var.set(str(self.launchbox_path))
+            self._set_status(
+                f"Loaded LaunchBox path from config: {self.launchbox_path}",
+                "success")
+            return
+
+        path = find_launchbox_path()
+        if path:
+            self.launchbox_path = path
+            self.path_var.set(str(path))
+            self._set_status(f"Found LaunchBox at {path}", "success")
+        else:
+            self.path_var.set("")
+            self._set_status(
+                "LaunchBox not auto-detected. Use Browse to set the folder.",
+                "warning")
+
+    def _browse_path(self):
+        frontend = self.frontend_var.get()
+        if frontend == "retrobat":
+            title = "Select RetroBat Installation Folder"
+            exes = ["retrobat.exe", "retrobat-new.exe"]
+            label = "RetroBat"
+        else:
+            title = "Select LaunchBox Installation Folder"
+            exes = ["LaunchBox.exe", "BigBox.exe"]
+            label = "LaunchBox"
+
+        folder = filedialog.askdirectory(title=title)
+        if not folder:
+            return
+
+        path = Path(folder)
+        found = any((path / exe).exists() for exe in exes)
+
+        # Check subdirectories if not found at root
+        if not found:
+            try:
                 for child in path.iterdir():
-                    if child.name.lower() == "retrobat" and child.is_dir():
-                        self.retrobat_path = child
-                        self.path_var.set(str(child))
-                        self._set_status(
-                            f"RetroBat path set: {child}", "success")
-                        return
-                messagebox.showwarning(
-                    "Not Found",
-                    "retrobat.exe was not found in the selected folder.\n"
-                    "Please select the root RetroBat folder.")
+                    if child.is_dir() and any(
+                            (child / exe).exists() for exe in exes):
+                        path = child
+                        found = True
+                        break
+            except OSError:
+                pass
+
+        if found:
+            if frontend == "retrobat":
+                self.retrobat_path = path
+            else:
+                self.launchbox_path = path
+            self.path_var.set(str(path))
+            self._set_status(f"{label} path set: {path}", "success")
+        else:
+            messagebox.showwarning(
+                "Not Found",
+                f"Expected executables not found in the selected folder.\n"
+                f"Please select the root {label} folder.")
 
     # ── save / apply ────────────────────────────────────────────
 
@@ -1086,44 +1250,58 @@ class RetroStickApp:
                 "Use Auto Detect or Manual Select for each player.")
             return
 
-        retrobat_path = self.path_var.get().strip()
-        if not retrobat_path:
+        frontend = self.frontend_var.get()
+        frontend_label = "RetroBat" if frontend == "retrobat" else "LaunchBox"
+
+        frontend_path = self.path_var.get().strip()
+        if not frontend_path:
             messagebox.showwarning("No Path",
-                "Please set the RetroBat installation path first.")
+                f"Please set the {frontend_label} installation path first.")
             return
 
-        retrobat_path = Path(retrobat_path)
+        frontend_path = Path(frontend_path)
+
+        # Store the path on the correct attribute
+        if frontend == "retrobat":
+            self.retrobat_path = frontend_path
+        else:
+            self.launchbox_path = frontend_path
 
         try:
             write_retrostick_config(
                 CONFIG_FILE, self.assignments,
-                retrobat_path=str(retrobat_path),
-                target_frontends=["retrobat"])
+                retrobat_path=str(frontend_path),
+                target_frontends=[frontend])
         except Exception as e:
             messagebox.showerror("Save Error", f"Failed to save config:\n{e}")
             return
 
         try:
-            success = apply_to_retrobat(self.assignments, retrobat_path)
+            if frontend == "retrobat":
+                success = apply_to_retrobat(self.assignments, frontend_path)
+            else:
+                success = apply_to_launchbox(self.assignments, frontend_path)
+
             if success:
                 self._set_status(
-                    "Configuration saved and applied to RetroBat!", "success")
+                    f"Configuration saved and applied to {frontend_label}!",
+                    "success")
                 messagebox.showinfo("Success",
                     "Controller assignments saved!\n\n"
-                    "The configuration has been applied to RetroBat.\n"
+                    f"The configuration has been applied to {frontend_label}.\n"
                     "It will also be re-applied automatically at startup\n"
                     "if you install the startup task.")
             else:
                 self._set_status(
-                    "Config saved but some RetroBat files couldn't be updated.",
-                    "warning")
+                    f"Config saved but some {frontend_label} files "
+                    "couldn't be updated.", "warning")
                 messagebox.showwarning("Partial Success",
-                    "Configuration saved, but some RetroBat config files\n"
-                    "couldn't be updated. Check the log for details.")
+                    f"Configuration saved, but some {frontend_label} config "
+                    "files\ncouldn't be updated. Check the log for details.")
         except Exception as e:
             self._set_status(f"Error applying config: {e}", "error")
             messagebox.showerror("Error",
-                                 f"Failed to apply to RetroBat:\n{e}")
+                                 f"Failed to apply to {frontend_label}:\n{e}")
 
     # ── startup task ────────────────────────────────────────────
 
@@ -1183,9 +1361,18 @@ class RetroStickApp:
                     for a in data.get("assignments", [])
                 ]
 
-                rb_path = data.get("retrobat_path", "")
-                if rb_path and Path(rb_path).exists():
-                    self.retrobat_path = Path(rb_path)
+                frontends = data.get("target_frontends", ["retrobat"])
+                if "launchbox" in frontends:
+                    self._saved_frontend = "launchbox"
+                else:
+                    self._saved_frontend = "retrobat"
+
+                saved_path = data.get("retrobat_path", "")
+                if saved_path and Path(saved_path).exists():
+                    if self._saved_frontend == "launchbox":
+                        self.launchbox_path = Path(saved_path)
+                    else:
+                        self.retrobat_path = Path(saved_path)
 
                 n = max((a.player_number for a in self.assignments), default=2)
                 self.num_players = n
@@ -1215,6 +1402,171 @@ class RetroStickApp:
             pass
         for child in widget.winfo_children():
             self._find_and_update_status(child, color)
+
+    # ── help window ──────────────────────────────────────────────
+
+    def _show_help(self):
+        hw = tk.Toplevel(self.root)
+        hw.title("RetroStick Fix - Help")
+        hw.configure(bg=COLORS["bg_dark"])
+        hw.resizable(True, True)
+
+        w, h = 680, 620
+        x = self.root.winfo_x() + (self.root.winfo_width() - w) // 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - h) // 2
+        hw.geometry(f"{w}x{h}+{x}+{y}")
+
+        try:
+            base = getattr(sys, '_MEIPASS',
+                           os.path.dirname(os.path.abspath(__file__)))
+            ico = os.path.join(base, "retrostick.ico")
+            if os.path.isfile(ico):
+                hw.iconbitmap(ico)
+        except Exception:
+            pass
+
+        # Scrollable content
+        canvas = tk.Canvas(hw, bg=COLORS["bg_dark"], highlightthickness=0)
+        scrollbar = tk.Scrollbar(hw, orient=tk.VERTICAL, command=canvas.yview)
+        content = tk.Frame(canvas, bg=COLORS["bg_dark"], padx=25, pady=15)
+
+        content.bind("<Configure>",
+                     lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=content, anchor=tk.NW)
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # Mouse-wheel scrolling
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        hw.bind("<Destroy>",
+                lambda _e: canvas.unbind_all("<MouseWheel>") if _e.widget is hw else None)
+
+        # ── Helper to add styled sections ──
+        def heading(text):
+            tk.Label(content, text=text, fg=COLORS["accent_blue"],
+                     bg=COLORS["bg_dark"], font=("Consolas", 14, "bold"),
+                     anchor=tk.W).pack(fill=tk.X, pady=(18, 4))
+            tk.Frame(content, bg=COLORS["border"], height=1).pack(fill=tk.X)
+
+        def para(text):
+            tk.Label(content, text=text, fg=COLORS["text_primary"],
+                     bg=COLORS["bg_dark"], font=("Segoe UI", 10),
+                     anchor=tk.W, justify=tk.LEFT,
+                     wraplength=600).pack(fill=tk.X, pady=(6, 0))
+
+        def bullet(text):
+            tk.Label(content, text=f"  \u2022  {text}", fg=COLORS["text_secondary"],
+                     bg=COLORS["bg_dark"], font=("Segoe UI", 10),
+                     anchor=tk.W, justify=tk.LEFT,
+                     wraplength=580).pack(fill=tk.X, pady=(2, 0))
+
+        def step(number, text):
+            f = tk.Frame(content, bg=COLORS["bg_dark"])
+            f.pack(fill=tk.X, pady=(4, 0))
+            tk.Label(f, text=f" {number} ", fg=COLORS["bg_dark"],
+                     bg=COLORS["accent_blue"], font=("Consolas", 10, "bold"),
+                     padx=4, pady=1).pack(side=tk.LEFT, padx=(4, 8))
+            tk.Label(f, text=text, fg=COLORS["text_primary"],
+                     bg=COLORS["bg_dark"], font=("Segoe UI", 10),
+                     anchor=tk.W, justify=tk.LEFT,
+                     wraplength=560).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        # ── Content ──
+        tk.Label(content, text="RETROSTICK FIX", fg=COLORS["accent_blue"],
+                 bg=COLORS["bg_dark"],
+                 font=("Consolas", 18, "bold")).pack(anchor=tk.W)
+        tk.Label(content, text=f"Version {APP_VERSION}",
+                 fg=COLORS["text_dim"], bg=COLORS["bg_dark"],
+                 font=("Consolas", 9)).pack(anchor=tk.W, pady=(0, 4))
+
+        heading("What is this?")
+        para("RetroStick Fix solves a common problem with arcade cabinets "
+             "running on Windows: every time you reboot, Windows can "
+             "randomly shuffle which USB controller is Player 1 and "
+             "which is Player 2.")
+        para("This tool identifies your controllers by their unique "
+             "hardware IDs (not the order Windows finds them) and writes "
+             "the correct player assignments to your frontend config "
+             "files every time.")
+
+        heading("Quick Start")
+        step("1", "Select your frontend (RetroBat or LaunchBox/BigBox) "
+             "and set the installation path. The app tries to find it "
+             "automatically.")
+        step("2", "Choose how many players your cabinet supports (1-4).")
+        step("3", "For each player, assign a controller using one of "
+             "two methods:")
+        bullet("Auto Detect - press and hold any button or move the "
+               "stick on the controller you want for that player. Hold "
+               "for 5 seconds until it is recognised.")
+        bullet("Manual Select - pick from a list of all detected "
+               "controllers. Useful if auto-detect has trouble "
+               "differentiating identical devices.")
+        step("4", "Click \"Apply & Save\" to write the assignments to "
+             "your frontend's config files.")
+        step("5", "Click \"Install Startup Task\" so the fix runs "
+             "automatically every time Windows boots, before your "
+             "frontend launches.")
+
+        heading("How does it work?")
+        para("Each USB controller has a unique hardware identifier "
+             "that includes a Vendor ID (VID), Product ID (PID), and an "
+             "instance-specific serial number or port path. These stay "
+             "the same across reboots.")
+        para("RetroStick Fix saves which hardware ID goes with which "
+             "player number. On startup, it detects the controllers, "
+             "matches them by hardware ID, and writes the correct "
+             "order into the frontend config files (e.g. es_input.cfg "
+             "and es_settings.cfg for RetroBat, or retroarch.cfg for "
+             "LaunchBox).")
+
+        heading("Identical Controllers")
+        para("If you have two identical encoder boards (same make and "
+             "model), they will have the same VID and PID. The app "
+             "differentiates them using their unique instance ID "
+             "(serial number or USB port path). When assigning, the "
+             "picker shows device numbers and port/serial info to "
+             "help you tell them apart.")
+        para("Tip: keep your controllers plugged into the same USB "
+             "ports so their instance IDs stay consistent.")
+
+        heading("Startup Task")
+        para("The \"Install Startup Task\" button places a small .bat "
+             "file in your Windows Startup folder. This runs the "
+             "controller fix silently each time you log in, before "
+             "your frontend launches. No admin rights are required.")
+
+        heading("Config Files")
+        para("Your settings are saved to:")
+        bullet("%USERPROFILE%\\.retrostick-fix\\retrostick_config.json")
+        para("Logs are written to:")
+        bullet("%USERPROFILE%\\.retrostick-fix\\retrostick.log")
+
+        heading("Troubleshooting")
+        bullet("Controllers not detected? Make sure they show up in "
+               "Windows Device Manager and try running as administrator.")
+        bullet("Config not taking effect? Close your frontend before "
+               "clicking Apply & Save.")
+        bullet("Still swapping after reboot? Check that the startup "
+               "task is installed (look in Task Manager > Startup tab).")
+        bullet("Moved a controller to a different USB port? Re-run "
+               "setup - the instance ID changes with the port.")
+
+        # Close button
+        tk.Frame(content, bg=COLORS["bg_dark"], height=15).pack()
+        tk.Button(content, text="Close", bg=COLORS["bg_card"],
+                  fg=COLORS["text_primary"], relief=tk.FLAT,
+                  font=("Segoe UI", 10), cursor="hand2",
+                  padx=20, pady=6,
+                  command=hw.destroy).pack(pady=(5, 10))
+
+        hw.transient(self.root)
+        hw.grab_set()
+        hw.focus_set()
 
     # ── run ─────────────────────────────────────────────────────
 

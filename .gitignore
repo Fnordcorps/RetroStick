@@ -28,11 +28,11 @@ desktop.ini
 # Build artifacts
 *.exe
 *.msi
-*.spec
 
 # User config (don't commit personal controller assignments)
 *.log
 retrostick_config.json
+es_settings.cfg
 
 # PyInstaller
 *.manifest

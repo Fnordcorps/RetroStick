@@ -1,5 +1,10 @@
 # 🕹️ RetroStick by Fnordcorps
 
+[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-ffdd00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/fnordcorps)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Platform: Windows](https://img.shields.io/badge/Platform-Windows%2010%2F11-blue.svg)]()
+[![Python 3.8+](https://img.shields.io/badge/Python-3.8%2B-green.svg)]()
+
 **Persistent arcade controller assignment for retro gaming cabinets on Windows**
 
 ---
@@ -297,10 +302,3 @@ MIT License — See [LICENSE](LICENSE) for details.
 ---
 
 *Made with ❤️ for the arcade cabinet community. No more swapped controllers!*
-
-
-
-
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Platform: Windows](https://img.shields.io/badge/Platform-Windows%2010%2F11-blue.svg)]()
-[![Python 3.8+](https://img.shields.io/badge/Python-3.8%2B-green.svg)]()

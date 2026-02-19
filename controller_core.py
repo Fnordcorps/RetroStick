@@ -219,6 +219,53 @@ def get_es_settings_cfg_path(retrobat_path: Path) -> Path:
     return retrobat_path / "emulationstation" / ".emulationstation" / "es_settings.cfg"
 
 
+def find_launchbox_path() -> Optional[Path]:
+    """Auto-detect LaunchBox installation path."""
+    common_paths = [
+        Path("C:/LaunchBox"),
+        Path("D:/LaunchBox"),
+        Path("E:/LaunchBox"),
+        Path(os.path.expanduser("~/LaunchBox")),
+    ]
+
+    for p in common_paths:
+        if (p / "LaunchBox.exe").exists() or (p / "BigBox.exe").exists():
+            return p
+
+    if sys.platform == "win32":
+        import string
+        for letter in string.ascii_uppercase:
+            p = Path(f"{letter}:/LaunchBox")
+            if (p / "LaunchBox.exe").exists() or (p / "BigBox.exe").exists():
+                return p
+
+    return None
+
+
+def get_retroarch_cfg_path(launchbox_path: Path) -> Optional[Path]:
+    """Find RetroArch config within or alongside a LaunchBox installation."""
+    candidates = [
+        launchbox_path / "ThirdParty" / "RetroArch" / "retroarch.cfg",
+        launchbox_path / "Emulators" / "RetroArch" / "retroarch.cfg",
+        launchbox_path / "RetroArch" / "retroarch.cfg",
+    ]
+
+    for p in candidates:
+        if p.exists():
+            return p
+
+    # Check common standalone RetroArch paths
+    if sys.platform == "win32":
+        import string
+        for letter in string.ascii_uppercase:
+            for sub in ["RetroArch", "RetroArch-Win64"]:
+                p = Path(f"{letter}:/{sub}/retroarch.cfg")
+                if p.exists():
+                    return p
+
+    return None
+
+
 # ─── Windows Controller Detection ───────────────────────────────────
 
 def detect_controllers_wmi() -> List[ControllerInfo]:
@@ -441,7 +488,7 @@ def write_retrostick_config(config_path: Path, assignments: List[PlayerAssignmen
         target_frontends = ["retrobat"]
     
     data = {
-        "version": "1.0",
+        "version": "2.0",
         "retrobat_path": str(retrobat_path),
         "target_frontends": target_frontends,
         "assignments": [a.to_dict() for a in assignments]
@@ -491,6 +538,15 @@ def apply_to_retrobat(assignments: List[PlayerAssignment], retrobat_path: Path) 
             reordered = reorder_input_configs(joystick_configs, assignments)
             
             if reordered:
+                # Tag deviceName with player number for in-menu identification
+                sorted_assigns = sorted(assignments, key=lambda a: a.player_number)
+                for idx, config in enumerate(reordered):
+                    if idx < len(sorted_assigns):
+                        pnum = sorted_assigns[idx].player_number
+                        original_name = config.get("deviceName", "")
+                        clean_name = re.sub(r'_Player\d+$', '', original_name)
+                        config.set("deviceName", f"{clean_name}_Player{pnum}")
+
                 # Rebuild the XML with keyboard first, then reordered joysticks
                 root.clear()
                 root.tag = "inputList"
@@ -564,9 +620,10 @@ def reorder_input_configs(joystick_configs: list,
                 if config_guid.lower() == ctrl.sdl_guid.lower():
                     score = max(score, 50)
             
-            # Check device name match
+            # Check device name match (strip any _PlayerN suffix)
             if config_name and ctrl.device_name:
-                if config_name.lower() == ctrl.device_name.lower():
+                clean_name = re.sub(r'_Player\d+$', '', config_name)
+                if clean_name.lower() == ctrl.device_name.lower():
                     score = max(score, 30)
             
             # Check VID/PID in GUID or path
@@ -589,55 +646,72 @@ def reorder_input_configs(joystick_configs: list,
     return ordered
 
 
-def update_es_settings_players(settings_path: Path, 
+def _xml_escape(text: str) -> str:
+    """Escape special characters for XML attribute values."""
+    return (text
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace('"', "&quot;"))
+
+
+def update_es_settings_players(settings_path: Path,
                                assignments: List[PlayerAssignment]):
     """Update es_settings.cfg with player-controller index mappings.
-    
+
     EmulationStation can have explicit player-to-controller index
     settings that override the default ordering.
+
+    RetroBat uses the format: INPUT P1NAME, INPUT P1GUID, INPUT P1PATH
+    (no space between the player number and field name).
     """
     if not settings_path.exists():
         return
-    
+
     lines = settings_path.read_text(encoding='utf-8').splitlines()
     new_lines = []
-    
-    # Remove any existing INPUT P* NAME/GUID lines we'll rewrite
+
+    # Remove existing INPUT P* NAME/GUID/PATH lines in BOTH formats:
+    #   "INPUT P1NAME"  (RetroBat native - no space)
+    #   "INPUT P1 NAME" (with space)
     player_setting_pattern = re.compile(
-        r'^\s*<string\s+name="INPUT\s+P\d+\s+(NAME|GUID|PATH)"'
+        r'^\s*<string\s+name="INPUT\s+P\d+\s*(NAME|GUID|PATH)"'
     )
-    
+
     for line in lines:
         if not player_setting_pattern.match(line):
             new_lines.append(line)
-    
+
     # Find insertion point (before </config> or at end)
     insert_idx = len(new_lines)
     for i in range(len(new_lines) - 1, -1, -1):
         if "</config>" in new_lines[i]:
             insert_idx = i
             break
-    
-    # Insert player assignment settings
-    for assignment in assignments:
+
+    # Insert player assignment settings using RetroBat's native format
+    for assignment in sorted(assignments, key=lambda a: a.player_number):
         ctrl = assignment.controller
         p = assignment.player_number
-        
+
         if ctrl.device_name:
-            new_lines.insert(insert_idx, 
-                f'\t<string name="INPUT P{p} NAME" value="{ctrl.device_name}" />')
+            clean_name = re.sub(r'_Player\d+$', '', ctrl.device_name)
+            tagged_name = _xml_escape(f"{clean_name}_Player{p}")
+            new_lines.insert(insert_idx,
+                f'  <string name="INPUT P{p}NAME" value="{tagged_name}" />')
             insert_idx += 1
-        
+
         if ctrl.sdl_guid:
             new_lines.insert(insert_idx,
-                f'\t<string name="INPUT P{p} GUID" value="{ctrl.sdl_guid}" />')
+                f'  <string name="INPUT P{p}GUID" value="{ctrl.sdl_guid}" />')
             insert_idx += 1
-        
+
         if ctrl.instance_id:
+            escaped_path = _xml_escape(ctrl.instance_id)
             new_lines.insert(insert_idx,
-                f'\t<string name="INPUT P{p} PATH" value="{ctrl.instance_id}" />')
+                f'  <string name="INPUT P{p}PATH" value="{escaped_path}" />')
             insert_idx += 1
-    
+
     settings_path.write_text('\n'.join(new_lines), encoding='utf-8')
 
 
@@ -656,6 +730,51 @@ def write_xml_pretty(tree: ET.ElementTree, path: Path):
     cleaned = '\n'.join(line for line in lines if line.strip())
     
     path.write_text(cleaned, encoding='utf-8')
+
+
+def apply_to_launchbox(assignments: List[PlayerAssignment],
+                       launchbox_path: Path) -> bool:
+    """Apply player assignments to LaunchBox/BigBox via RetroArch config.
+
+    LaunchBox typically uses RetroArch for emulation. We modify retroarch.cfg
+    to set input_playerN_joypad_index values that map controllers to
+    the correct player slots.
+    """
+    retroarch_cfg = get_retroarch_cfg_path(launchbox_path)
+
+    if retroarch_cfg is None:
+        logger.warning("RetroArch config not found within LaunchBox installation")
+        return False
+
+    try:
+        lines = retroarch_cfg.read_text(encoding='utf-8').splitlines()
+
+        # Remove existing player joypad index settings
+        player_index_pattern = re.compile(
+            r'^\s*input_player\d+_joypad_index\s*=')
+        lines = [l for l in lines if not player_index_pattern.match(l)]
+
+        # Remove any previous RetroStick comment block
+        lines = [l for l in lines
+                 if l.strip() != "# RetroStick Fix - Player controller assignments"]
+
+        # Add player joypad index assignments
+        sorted_assignments = sorted(assignments, key=lambda a: a.player_number)
+        lines.append("")
+        lines.append("# RetroStick Fix - Player controller assignments")
+        for assignment in sorted_assignments:
+            p = assignment.player_number
+            ctrl = assignment.controller
+            idx = ctrl.xinput_index if ctrl.xinput_index >= 0 else (p - 1)
+            lines.append(f'input_player{p}_joypad_index = "{idx}"')
+
+        retroarch_cfg.write_text('\n'.join(lines) + '\n', encoding='utf-8')
+        logger.info(f"Updated RetroArch config at {retroarch_cfg}")
+        return True
+
+    except Exception as e:
+        logger.error(f"Error updating RetroArch config: {e}")
+        return False
 
 
 # ─── Startup Application Logic ──────────────────────────────────────
@@ -722,14 +841,24 @@ def run_startup_fix(config_path: Path) -> bool:
     
     # Apply to frontends
     targets = config.get("target_frontends", ["retrobat"])
-    
+    success = True
+
     if "retrobat" in targets:
-        success = apply_to_retrobat(matched_assignments, retrobat_path)
-        if success:
+        rb_ok = apply_to_retrobat(matched_assignments, retrobat_path)
+        if rb_ok:
             logger.info("Successfully applied controller assignments to RetroBat!")
         else:
             logger.error("Failed to apply some controller assignments to RetroBat")
-            return False
-    
-    logger.info("Controller assignment fix complete!")
-    return True
+            success = False
+
+    if "launchbox" in targets:
+        lb_ok = apply_to_launchbox(matched_assignments, retrobat_path)
+        if lb_ok:
+            logger.info("Successfully applied controller assignments to LaunchBox!")
+        else:
+            logger.error("Failed to apply controller assignments to LaunchBox")
+            success = False
+
+    if success:
+        logger.info("Controller assignment fix complete!")
+    return success
