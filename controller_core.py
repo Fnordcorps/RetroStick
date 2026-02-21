@@ -185,6 +185,25 @@ class ControllerInfo:
             name += f" [{self.vid}:{self.pid}]"
         return name
 
+    def get_sdl_guid(self) -> str:
+        """Generate an SDL2-style GUID from VID and PID.
+
+        SDL2 GUIDs on Windows follow this layout (32 hex chars):
+          03000000  VVVV0000  PPPP0000  00007200
+        where VVVV and PPPP are VID/PID in little-endian byte order.
+        If a saved sdl_guid already exists, return that instead.
+        """
+        if self.sdl_guid:
+            return self.sdl_guid
+        if not self.vid or not self.pid:
+            return ""
+        try:
+            vid_le = int(self.vid, 16).to_bytes(2, 'little').hex()
+            pid_le = int(self.pid, 16).to_bytes(2, 'little').hex()
+            return f"03000000{vid_le}0000{pid_le}000000007200"
+        except (ValueError, OverflowError):
+            return ""
+
     def matches(self, other: 'ControllerInfo') -> bool:
         """Check if this controller matches another by hardware identity.
         
@@ -723,35 +742,49 @@ def update_es_settings_players(settings_path: Path,
         if not player_setting_pattern.match(line):
             new_lines.append(line)
 
-    # Find insertion point (before </config> or at end)
-    insert_idx = len(new_lines)
-    for i in range(len(new_lines) - 1, -1, -1):
-        if "</config>" in new_lines[i]:
-            insert_idx = i
-            break
-
-    # Insert player assignment settings using RetroBat's native format
+    # Build the new INPUT lines (GUID, NAME, PATH for each player)
+    input_lines = []
     for assignment in sorted(assignments, key=lambda a: a.player_number):
         ctrl = assignment.controller
         p = assignment.player_number
 
+        guid = ctrl.get_sdl_guid()
+        if guid:
+            input_lines.append(
+                f'\t<string name="INPUT P{p}GUID" value="{guid}" />')
+
         if ctrl.device_name:
             clean_name = re.sub(r'_Player\d+$', '', ctrl.device_name)
             tagged_name = _xml_escape(f"{clean_name}_Player{p}")
-            new_lines.insert(insert_idx,
-                f'  <string name="INPUT P{p}NAME" value="{tagged_name}" />')
-            insert_idx += 1
-
-        if ctrl.sdl_guid:
-            new_lines.insert(insert_idx,
-                f'  <string name="INPUT P{p}GUID" value="{ctrl.sdl_guid}" />')
-            insert_idx += 1
+            input_lines.append(
+                f'\t<string name="INPUT P{p}NAME" value="{tagged_name}" />')
 
         if ctrl.instance_id:
             escaped_path = _xml_escape(ctrl.instance_id)
-            new_lines.insert(insert_idx,
-                f'  <string name="INPUT P{p}PATH" value="{escaped_path}" />')
-            insert_idx += 1
+            input_lines.append(
+                f'\t<string name="INPUT P{p}PATH" value="{escaped_path}" />')
+
+    # Insert in alphabetical order among existing <string> lines.
+    # Find the right position: after the last <string> whose name
+    # sorts before "INPUT P" and before the first that sorts after.
+    insert_idx = None
+    for i, line in enumerate(new_lines):
+        m = re.match(r'^\s*<string\s+name="([^"]*)"', line)
+        if m and m.group(1) > "INPUT P":
+            insert_idx = i
+            break
+
+    # Fallback: insert before </config>
+    if insert_idx is None:
+        for i in range(len(new_lines) - 1, -1, -1):
+            if "</config>" in new_lines[i]:
+                insert_idx = i
+                break
+        if insert_idx is None:
+            insert_idx = len(new_lines)
+
+    for offset, line in enumerate(input_lines):
+        new_lines.insert(insert_idx + offset, line)
 
     settings_path.write_text('\n'.join(new_lines), encoding='utf-8')
 
