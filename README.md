@@ -263,15 +263,6 @@ This is normal for identical encoder boards (e.g. two Brooks boards). The **inst
 | **Manually re-plugging** | Requires opening the cabinet | Automatic, no physical access needed |
 | **RetroBat built-in** | Doesn't persist across reboots | Persistent across reboots |
 
-## Contributing
-
-Contributions are welcome! Areas where help is especially appreciated:
-
-- **LaunchBox/BigBox integration** — Need to understand their controller config format
-- **Batocera Windows support** — Similar config file modifications
-- **Compiled releases** — PyInstaller/cx_Freeze packaging for standalone .exe
-- **Testing** — Different encoder boards, controller types, edge cases
-- **Documentation** — Screenshots, video tutorials, translated guides
 
 ### Building from Source
 
